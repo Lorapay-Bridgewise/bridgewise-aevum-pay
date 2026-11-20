@@ -1,0 +1,36 @@
+{
+  "name": "bridgewise-settlement-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Settles offline tUSD8 vouchers from Bridgewise Mesh on the Aevum testnet",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.10",
+    "better-sqlite3": "^13.2.0",
+    "hono": "^4.13.19",
+    "viem": "^2.58.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.1"
+  },
+  "main": "dist/index.js",
+  "directories": {
+    "test": "test"
+  }
+}

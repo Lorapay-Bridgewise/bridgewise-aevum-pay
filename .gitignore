@@ -18,3 +18,10 @@ docs/
 keystore/
 .env.*
 !.env.example
+
+# Agent
+agent/node_modules/
+agent/dist/
+agent/data/
+agent/.env
+agent/.deployed-sha

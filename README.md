@@ -8,8 +8,8 @@ The voucher travels over Bridgewise Mesh (Bluetooth, phone to phone) until a pho
 internet uploads it. A settlement agent submits it to the `OfflineVault` contract, pays the
 gas, and sends a receipt back over the mesh.
 
-> Status: work in progress. This repo currently holds the contract, tests and scripts.
-> The Android app and the settlement agent come next.
+> Status: work in progress. This repo holds the contract (`src/`), its tests and scripts, and the
+> settlement agent (`agent/`). The Android app comes next.
 
 ## Network
 
@@ -61,6 +61,12 @@ pays gas in exchange for the fee in tUSD8.
 | Fee limit | The settler cannot take more than the `maxFee` the payer signed |
 | Audit trail | `Deposited`, `SessionOpened`, `SessionRevoked`, `VoucherSettled`, `Withdrawn` events |
 
+## Settlement agent
+
+`agent/` is a small TypeScript service (viem, Hono, SQLite) that receives vouchers from the Mesh Cloud
+webhook, simulates them, settles them with retries that can never pay twice, and answers with a receipt
+it signs (EIP-712). See [agent/README.md](agent/README.md).
+
 ## Voucher signing format
 
 ```
@@ -103,14 +109,16 @@ forge script script/DemoOfflinePayment.s.sol --rpc-url aevum --account aevum-pay
 | OfflineVault | [`0x5E6f3d12AaeB6732840432D19BCc26a35e0F0184`](https://explorer-test.qday.info/address/0x5E6f3d12AaeB6732840432D19BCc26a35e0F0184) |
 | tUSD8 | [`0x456569838f1d43009A91ebA4263147Afd7233483`](https://explorer-test.qday.info/address/0x456569838f1d43009A91ebA4263147Afd7233483) |
 
-### First run on Aevum testnet (20 Nov 2026)
+### On chain proof (20 Nov 2026)
 
 | Step | Transaction |
 |---|---|
+| First tUSD8 transfer from a script | [`0x64d7...e3e8`](https://explorer-test.qday.info/tx/0x64d797238d04e5381d9c6b4eebc2e620f5fd8e575a552bdb091d289f40d1e3e8) |
 | Deploy OfflineVault | [`0xba63...2b53`](https://explorer-test.qday.info/tx/0xba6351e01859e8cd31a3eb376e641dbfbcfb25e3b3192b61673850f41b632b53) |
-| Settle an offline voucher (1 tUSD8, 375,947 gas) | [`0x1a29...ec6c`](https://explorer-test.qday.info/tx/0x1a29140abbd17f5dcc26bdcbd8eafa4a99171dfa2132714cf1344a89e679ec6c) |
-
-Full logs of every run are in `broadcast/`.
+| Approve vault | [`0x19e0...b523`](https://explorer-test.qday.info/tx/0x19e036e6755adeb23e8ba9db2d814474d8664eb86327bbf3e8495c895763b523) |
+| Deposit 3 tUSD8 | [`0xa889...637b`](https://explorer-test.qday.info/tx/0xa88911218e3029f6c5ddc29218f538ff464110d7ac2c6a983642b9ec07af637b) |
+| Open session for a P-256 key | [`0xb7f1...48e3`](https://explorer-test.qday.info/tx/0xb7f1c3a6fe517c85fc9c02530870cef1c82b0472a60a123be2031dd6d8f848e3) |
+| Settle a P-256 signed voucher (1 tUSD8, fee 0.01) | [`0x1a29...ec6c`](https://explorer-test.qday.info/tx/0x1a29140abbd17f5dcc26bdcbd8eafa4a99171dfa2132714cf1344a89e679ec6c) |
 
 ## Known limits
 
@@ -121,8 +129,9 @@ Full logs of every run are in `broadcast/`.
    cannot be trusted.
 3. **Permissionless settlement.** Anyone holding a voucher may settle it and take the fee (up to `maxFee`).
    The payee is always paid the signed amount.
-4. **Gas.** The P-256 check runs in Solidity (about 376k gas per settlement on Aevum) because Aevum has no P-256
-   precompile yet. The contract uses the RIP-7212 precompile automatically if one appears.
+4. **Gas.** The P-256 check runs in Solidity (about 376k gas per settlement on Aevum) because Aevum has no
+   P-256 precompile yet. At the testnet gas price seen on 20 Nov (8 wei) that is negligible. The contract uses
+   the RIP-7212 precompile automatically if one appears.
 
 ## License
 

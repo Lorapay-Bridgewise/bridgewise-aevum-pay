@@ -1,0 +1,24 @@
+# Runs next to other apps on the same server. It only listens on 127.0.0.1, so it never
+# touches ports 80 and 443; the server's reverse proxy sends agent.lorapay.io to it.
+services:
+  agent:
+    build: .
+    # Each deploy tags the image with its commit, so a rollback needs no rebuild.
+    image: bwpay-agent:${AGENT_TAG:-latest}
+    container_name: bwpay-agent
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_PATH: /data/agent.db
+    ports:
+      - "127.0.0.1:${AGENT_HOST_PORT:-8787}:8787"
+    volumes:
+      - agent-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  agent-data:

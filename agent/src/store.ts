@@ -1,0 +1,107 @@
+import Database from "better-sqlite3";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import type { Hex } from "viem";
+import type { SettlementStatus } from "./messages.js";
+
+export type Row = {
+  key: string;
+  session_id: Hex;
+  nonce: Hex;
+  status: "sending" | Exclude<SettlementStatus, "unknown" | "retry">;
+  tx_hash: Hex | null;
+  block: string | null;
+  fee: string | null;
+  reason: string | null;
+  voucher_json: string;
+  from_block: string;
+  attempts: number;
+  created_at: number;
+  updated_at: number;
+};
+
+/** One row per voucher (session id + nonce). The vault refuses a nonce twice, so retries are always safe. */
+export class Store {
+  private db: Database.Database;
+
+  constructor(path: string) {
+    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    this.db = new Database(path);
+    this.db.pragma("journal_mode = WAL");
+    this.db.exec(`
+      create table if not exists settlements (
+        key text primary key,
+        session_id text not null,
+        nonce text not null,
+        status text not null,
+        tx_hash text,
+        block text,
+        fee text,
+        reason text,
+        voucher_json text not null,
+        from_block text not null,
+        attempts integer not null default 0,
+        created_at integer not null,
+        updated_at integer not null
+      );
+      create index if not exists settlements_status on settlements(status);
+    `);
+  }
+
+  static key(sessionId: Hex, nonce: Hex): string {
+    return `${sessionId.toLowerCase()}:${nonce.toLowerCase()}`;
+  }
+
+  get(sessionId: Hex, nonce: Hex): Row | undefined {
+    return this.db.prepare("select * from settlements where key = ?").get(Store.key(sessionId, nonce)) as
+      | Row
+      | undefined;
+  }
+
+  /** Insert a new row in state "sending". Returns false if the voucher is already known. */
+  claim(sessionId: Hex, nonce: Hex, voucherJson: string, fromBlock: bigint): boolean {
+    const now = Date.now();
+    const res = this.db
+      .prepare(
+        `insert or ignore into settlements (key, session_id, nonce, status, voucher_json, from_block, created_at, updated_at)
+         values (?, ?, ?, 'sending', ?, ?, ?, ?)`,
+      )
+      .run(Store.key(sessionId, nonce), sessionId, nonce, voucherJson, fromBlock.toString(), now, now);
+    return res.changes === 1;
+  }
+
+  update(sessionId: Hex, nonce: Hex, fields: Partial<Pick<Row, "status" | "tx_hash" | "block" | "fee" | "reason">>) {
+    const sets = Object.keys(fields).map((k) => `${k} = @${k}`);
+    this.db
+      .prepare(`update settlements set ${sets.join(", ")}, updated_at = @now where key = @key`)
+      .run({ ...fields, now: Date.now(), key: Store.key(sessionId, nonce) });
+  }
+
+  bumpAttempts(sessionId: Hex, nonce: Hex) {
+    this.db
+      .prepare("update settlements set attempts = attempts + 1, updated_at = ? where key = ?")
+      .run(Date.now(), Store.key(sessionId, nonce));
+  }
+
+  forget(sessionId: Hex, nonce: Hex) {
+    this.db.prepare("delete from settlements where key = ?").run(Store.key(sessionId, nonce));
+  }
+
+  pending(): Row[] {
+    return this.db
+      .prepare("select * from settlements where status in ('sending', 'submitted') order by created_at limit 100")
+      .all() as Row[];
+  }
+
+  counts(): Record<string, number> {
+    const rows = this.db.prepare("select status, count(*) as n from settlements group by status").all() as {
+      status: string;
+      n: number;
+    }[];
+    return Object.fromEntries(rows.map((r) => [r.status, r.n]));
+  }
+
+  close() {
+    this.db.close();
+  }
+}
