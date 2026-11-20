@@ -1,5 +1,10 @@
 # Bridgewise settlement agent
 FROM node:22-slim AS build
+# better-sqlite3 compiles itself when no prebuilt binary matches this Node version.
+# The tools stay in this build stage; the final image only gets the compiled module.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
