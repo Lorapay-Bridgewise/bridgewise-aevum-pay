@@ -33,6 +33,10 @@ const schema = z.object({
   RATE_PER_SESSION_HOUR: z.coerce.number().int().positive().default(30),
   /** New vouchers per mesh node (gateway phone) per hour. */
   RATE_PER_NODE_HOUR: z.coerce.number().int().positive().default(120),
+  /** Owner actions (deposit, add or remove a phone key, withdraw) per wallet per hour. */
+  RATE_PER_OWNER_HOUR: z.coerce.number().int().positive().default(20),
+  /** Smallest deposit the agent submits, in tUSD8 units (0.1 tUSD8). */
+  MIN_DEPOSIT_UNITS: z.coerce.bigint().default(100_000n),
   /** Settlement transactions per UTC day. */
   DAILY_TX_CAP: z.coerce.number().int().positive().default(1_000),
   /** Gas the agent may spend per UTC day, in wei. 0.05 tQDAY by default. */
@@ -58,6 +62,8 @@ export type Config = {
   maxVoucherTtlSec: number;
   ratePerSessionHour: number;
   ratePerNodeHour: number;
+  ratePerOwnerHour: number;
+  minDepositUnits: bigint;
   dailyTxCap: number;
   dailyGasBudgetWei: bigint;
   vaultFromBlock: bigint;
@@ -116,6 +122,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxVoucherTtlSec: e.MAX_VOUCHER_TTL_SEC,
     ratePerSessionHour: e.RATE_PER_SESSION_HOUR,
     ratePerNodeHour: e.RATE_PER_NODE_HOUR,
+    ratePerOwnerHour: e.RATE_PER_OWNER_HOUR,
+    minDepositUnits: e.MIN_DEPOSIT_UNITS,
     dailyTxCap: e.DAILY_TX_CAP,
     dailyGasBudgetWei: e.DAILY_GAS_BUDGET_WEI,
     vaultFromBlock: e.VAULT_FROM_BLOCK,

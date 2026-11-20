@@ -211,6 +211,8 @@ beforeAll(async () => {
     maxVoucherTtlSec: 7 * 86_400,
     ratePerSessionHour: 30,
     ratePerNodeHour: 120,
+    ratePerOwnerHour: 20,
+    minDepositUnits: 100_000n,
     dailyTxCap: 1_000,
     dailyGasBudgetWei: 10n ** 18n,
     vaultFromBlock: 0n,
@@ -458,5 +460,132 @@ describe("activity page", () => {
     expect(tusd(1_000_000n)).toBe("1.00");
     expect(tusd("10000")).toBe("0.01");
     expect(tusd(1_234_567_000n)).toBe("1,234.567");
+  });
+});
+
+describe("owner relay (the phone's wallet never needs gas)", () => {
+  const wallet = privateKeyToAccount(`0x${randomBytes(32).toString("hex")}` as Hex);
+  // The chain clock is a day ahead after the recovery test
+  const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 2 * 86_400);
+  const vaultDomain = () => ({ name: "Bridgewise OfflineVault", version: "1", chainId: CHAIN_ID, verifyingContract: vault });
+  const post = async (path: string, body: unknown) => {
+    const res = await app.request(path, { method: "POST", body: JSON.stringify(body, (_k, v) => (typeof v === "bigint" ? v.toString() : v)) });
+    return { http: res.status, ...((await res.json()) as { status?: string; reason?: string; txHash?: string; error?: string }) };
+  };
+  const ownerNonce = () => pub.readContract({ address: vault, abi: offlineVaultAbi, functionName: "ownerNonce", args: [wallet.address] });
+  let key: ReturnType<typeof p256Key>;
+  let sid: Hex;
+
+  it("deposits with a permit the wallet signed", async () => {
+    await tx(owner.writeContract({ address: token, abi: tokenAbi, functionName: "mint", args: [wallet.address, 10n * ONE] }));
+    const nonce = await pub.readContract({
+      address: token,
+      abi: [{ type: "function", name: "nonces", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" }] as const,
+      functionName: "nonces",
+      args: [wallet.address],
+    });
+    const dl = deadline();
+    const sig = await wallet.signTypedData({
+      domain: { name: "Test USD8", version: "1", chainId: CHAIN_ID, verifyingContract: token },
+      types: {
+        Permit: [
+          { name: "owner", type: "address" },
+          { name: "spender", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "nonce", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+        ],
+      },
+      primaryType: "Permit",
+      message: { owner: wallet.address, spender: vault, value: 4n * ONE, nonce, deadline: dl },
+    });
+    const res = await post("/v1/owner/deposit", {
+      owner: wallet.address,
+      amount: 4n * ONE,
+      deadline: dl,
+      v: parseInt(sig.slice(130, 132), 16),
+      r: `0x${sig.slice(2, 66)}`,
+      s: `0x${sig.slice(66, 130)}`,
+    });
+    expect(res.status).toBe("confirmed");
+    expect(await pub.readContract({ address: vault, abi: offlineVaultAbi, functionName: "balanceOf", args: [wallet.address] })).toBe(4n * ONE);
+    expect(await pub.getBalance({ address: wallet.address })).toBe(0n);
+  });
+
+  async function sessionBody(k: ReturnType<typeof p256Key>, nonce: bigint) {
+    const dl = deadline();
+    const params = { qx: k.qx, qy: k.qy, perPaymentCap: 2n * ONE, dailyCap: 3n * ONE, expiresAt: BigInt(Math.floor(Date.now() / 1000) + 7 * 86_400) };
+    const sig = await wallet.signTypedData({
+      domain: vaultDomain(),
+      types: {
+        OpenSession: [
+          { name: "owner", type: "address" },
+          { name: "qx", type: "bytes32" },
+          { name: "qy", type: "bytes32" },
+          { name: "perPaymentCap", type: "uint128" },
+          { name: "dailyCap", type: "uint128" },
+          { name: "expiresAt", type: "uint64" },
+          { name: "nonce", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+        ],
+      },
+      primaryType: "OpenSession",
+      message: { owner: wallet.address, ...params, nonce, deadline: dl },
+    });
+    return { owner: wallet.address, params, deadline: dl, sig };
+  }
+
+  it("adds a phone key, and refuses the same request twice without spending gas", async () => {
+    key = p256Key();
+    const body = await sessionBody(key, await ownerNonce());
+    expect((await post("/v1/owner/session", body)).status).toBe("confirmed");
+    sid = await pub.readContract({ address: vault, abi: offlineVaultAbi, functionName: "sessionIdOf", args: [wallet.address, key.qx, key.qy] });
+    expect((await pub.readContract({ address: vault, abi: offlineVaultAbi, functionName: "getSession", args: [sid] })).owner).toBe(wallet.address);
+
+    const before = await pub.getTransactionCount({ address: settler.agentAddress });
+    const again = await post("/v1/owner/session", body);
+    expect(again.status).toBe("rejected");
+    expect(await pub.getTransactionCount({ address: settler.agentAddress })).toBe(before);
+  });
+
+  it("removes the phone key, after which its vouchers are refused", async () => {
+    const dl = deadline();
+    const sig = await wallet.signTypedData({
+      domain: vaultDomain(),
+      types: { Revoke: [{ name: "sessionId", type: "bytes32" }, { name: "deadline", type: "uint256" }] },
+      primaryType: "Revoke",
+      message: { sessionId: sid, deadline: dl },
+    });
+    expect((await post("/v1/owner/revoke", { sessionId: sid, deadline: dl, sig })).status).toBe("confirmed");
+    expect((await pub.readContract({ address: vault, abi: offlineVaultAbi, functionName: "getSession", args: [sid] })).revoked).toBe(true);
+  });
+
+  it("withdraws what is left", async () => {
+    const dl = deadline();
+    const amount = await pub.readContract({ address: vault, abi: offlineVaultAbi, functionName: "balanceOf", args: [wallet.address] });
+    const sig = await wallet.signTypedData({
+      domain: vaultDomain(),
+      types: {
+        Withdraw: [
+          { name: "owner", type: "address" },
+          { name: "to", type: "address" },
+          { name: "amount", type: "uint256" },
+          { name: "nonce", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+        ],
+      },
+      primaryType: "Withdraw",
+      message: { owner: wallet.address, to: wallet.address, amount, nonce: await ownerNonce(), deadline: dl },
+    });
+    expect((await post("/v1/owner/withdraw", { owner: wallet.address, to: wallet.address, amount, deadline: dl, sig })).status).toBe("confirmed");
+    expect(await balance(wallet.address)).toBe(10n * ONE);
+  });
+
+  it("refuses tiny deposits, passed deadlines and malformed requests", async () => {
+    const tiny = await post("/v1/owner/deposit", { owner: wallet.address, amount: 1n, deadline: deadline(), v: 27, r: `0x${"11".repeat(32)}`, s: `0x${"22".repeat(32)}` });
+    expect(tiny.reason).toBe("DepositTooSmall");
+    const late = await post("/v1/owner/revoke", { sessionId: sid, deadline: 1n, sig: `0x${"11".repeat(65)}` });
+    expect(late.reason).toBe("DeadlinePassed");
+    expect((await post("/v1/owner/withdraw", { owner: "nope" })).http).toBe(400);
   });
 });

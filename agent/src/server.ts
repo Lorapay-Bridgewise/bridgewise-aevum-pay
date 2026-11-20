@@ -6,6 +6,7 @@ import { phoneMessage, RECEIPT_CT, type Receipt } from "./messages.js";
 import { log, type Origin, type Settler } from "./settler.js";
 import type { ActivityFeed } from "./activity.js";
 import { renderActivity } from "./page.js";
+import { addOwnerRoutes } from "./ownerRoutes.js";
 
 const MAX_MESH_BYTES = 2048;
 
@@ -83,6 +84,8 @@ export function createApp(settler: Settler, feed?: ActivityFeed) {
     const answer = await dispatch(safeJson(await c.req.text()));
     return c.json(answer, "error" in answer ? 400 : 200);
   });
+
+  addOwnerRoutes(app, settler);
 
   /** Public lookup: receipts only say what is already public on chain. */
   app.get("/v1/vouchers/:sessionId/:nonce", async (c) => {

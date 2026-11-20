@@ -36,7 +36,14 @@ runs before any call to the chain, so a refused voucher costs nothing.
 | Gas per UTC day | `DAILY_GAS_BUDGET_WEI` = 0.05 tQDAY | `retry`, `AgentGasBudgetReached` |
 | Public test keys (anvil, Hardhat) as the agent key | refused on any real network | the agent does not start |
 
+| Owner actions per wallet per hour | `RATE_PER_OWNER_HOUR` = 20 | `retry`, `RateLimited` |
+| Smallest deposit it submits | `MIN_DEPOSIT_UNITS` = 0.1 tUSD8 | `rejected`, `DepositTooSmall` |
+
 A voucher the agent already knows is always answered from its records, whatever the limits.
+
+Owner actions answer `{status, txHash?, reason?}` with status `confirmed`, `submitted`, `rejected` or
+`retry`. The vault checks the owner's signature and nonce, so a forged or repeated request fails the
+dry run and costs no gas.
 The week limit is longer than the starter kit's one hour on purpose: an offline payment can take
 days to reach a phone with signal. Limits live in memory and in the agent's SQLite file, which is
 fine for one server.
@@ -107,6 +114,10 @@ status: 0 unknown, 1 submitted, 2 confirmed, 3 rejected, 4 retry
 | `POST /v1/vouchers` | `x-api-key: $TEST_API_KEY` | Same messages without the mesh, for curl tests |
 | `GET /v1/vouchers/:sessionId/:nonce` | none | Receipt for a voucher (public data) |
 | `GET /health` | none | Chain, agent address, gas balance, counts. 503 when gas is low |
+| `POST /v1/owner/deposit` | the owner's tUSD8 permit | Deposit into the vault without tQDAY (`depositWithPermit`) |
+| `POST /v1/owner/session` | the owner's signature | Add a phone key with limits (`openSessionBySig`) |
+| `POST /v1/owner/revoke` | the owner's signature | Remove a phone key (`revokeBySig`) |
+| `POST /v1/owner/withdraw` | the owner's signature | Take money back out (`withdrawBySig`) |
 | `GET /activity` | none | Activity page: every vault event read from the chain, with explorer links |
 | `GET /v1/activity` | none | The same as JSON |
 | `GET /live` | none | Liveness only (Docker and the deploy check) |

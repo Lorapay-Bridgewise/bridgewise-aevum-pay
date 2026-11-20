@@ -24,6 +24,9 @@ export const utcDay = (ms = Date.now()) => new Date(ms).toISOString().slice(0, 1
 /** Where a voucher came from: the mesh node that uploaded it, or "api" for the direct endpoint. */
 export type Origin = { node?: string };
 
+export type OwnerAction = "depositWithPermit" | "openSessionBySig" | "revokeBySig" | "withdrawBySig";
+export type RelayResult = { status: "confirmed" | "submitted" | "rejected" | "retry"; txHash?: Hex; reason?: string };
+
 const ZERO_HASH = `0x${"0".repeat(64)}` as Hex;
 const STATUS_CODE = { unknown: 0, submitted: 1, confirmed: 2, rejected: 3, retry: 4 } as const;
 
@@ -254,6 +257,59 @@ export class Settler {
       if (name) return { kind: "revert", error: name };
       throw err; // RPC trouble: not the voucher's fault
     }
+  }
+
+  /**
+   * Submit an owner action the owner signed (deposit by permit, open session, revoke, withdraw).
+   * The vault checks the owner's signature and nonce, so a repeat or a forgery fails the dry run
+   * and costs nothing. Waits up to the deadline for the block.
+   */
+  async relayOwnerAction(
+    functionName: OwnerAction,
+    args: readonly unknown[],
+    deadlineMs = Date.now() + this.cfg.confirmWaitMs,
+  ): Promise<RelayResult> {
+    const budget = this.budgetLeft();
+    if (budget) return { status: "retry", reason: budget };
+    const call = { address: this.cfg.vault, abi: offlineVaultAbi, functionName, args, account: this.account } as const;
+    try {
+      await this.publicClient.simulateContract(call as never);
+    } catch (err) {
+      const name = revertName(err);
+      if (name) return { status: "rejected", reason: name };
+      return { status: "retry", reason: "ChainUnavailable" };
+    }
+    let hash: Hex;
+    try {
+      const job = this.sendQueue.then(async () => {
+        const h = await this.walletClient.writeContract({
+          address: this.cfg.vault,
+          abi: offlineVaultAbi,
+          functionName,
+          args,
+          account: this.account,
+          chain: this.chain,
+          gas: 400_000n,
+        } as never);
+        this.store.addSpend(utcDay(), 1, 0n);
+        log("info", "owner_action_submitted", { action: functionName, hash: h });
+        return h;
+      });
+      this.sendQueue = job.catch(() => undefined);
+      hash = await job;
+    } catch (err) {
+      log("warn", "owner_action_failed", { action: functionName, err: short(err) });
+      return { status: "retry", reason: "ChainUnavailable" };
+    }
+    const wait = Math.max(0, deadlineMs - Date.now());
+    const rcpt = await this.publicClient
+      .waitForTransactionReceipt({ hash, timeout: wait, pollingInterval: 400 })
+      .catch(() => null);
+    if (!rcpt) return { status: "submitted", txHash: hash };
+    this.store.addSpend(utcDay(), 0, rcpt.gasUsed * (rcpt.effectiveGasPrice ?? 0n));
+    return rcpt.status === "success"
+      ? { status: "confirmed", txHash: hash }
+      : { status: "rejected", txHash: hash, reason: "Reverted" };
   }
 
   /** null if the agent may send another transaction today, otherwise the reason it may not. */
