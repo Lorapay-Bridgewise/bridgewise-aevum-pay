@@ -17,6 +17,12 @@ import { offlineVaultAbi } from "./abi.js";
 import type { Config } from "./config.js";
 import { toVoucher, type Receipt, type VoucherMessage, type Voucher } from "./messages.js";
 import { Store, type Row } from "./store.js";
+import { RateLimiter } from "./rateLimit.js";
+
+export const utcDay = (ms = Date.now()) => new Date(ms).toISOString().slice(0, 10);
+
+/** Where a voucher came from: the mesh node that uploaded it, or "api" for the direct endpoint. */
+export type Origin = { node?: string };
 
 const ZERO_HASH = `0x${"0".repeat(64)}` as Hex;
 const STATUS_CODE = { unknown: 0, submitted: 1, confirmed: 2, rejected: 3, retry: 4 } as const;
@@ -42,6 +48,8 @@ export class Settler {
   readonly publicClient: PublicClient;
   readonly walletClient: WalletClient;
   private sendQueue: Promise<unknown> = Promise.resolve();
+  private readonly perSession: RateLimiter;
+  private readonly perNode: RateLimiter;
 
   constructor(
     readonly cfg: Config,
@@ -58,6 +66,8 @@ export class Settler {
     const transport = http(cfg.rpcUrl, { retryCount: 2, timeout: 10_000 });
     this.publicClient = createPublicClient({ chain: this.chain, transport, pollingInterval: 500 }) as PublicClient;
     this.walletClient = createWalletClient({ chain: this.chain, transport, account: this.account });
+    this.perSession = new RateLimiter(cfg.ratePerSessionHour);
+    this.perNode = new RateLimiter(cfg.ratePerNodeHour);
   }
 
   get agentAddress(): Address {
@@ -67,14 +77,37 @@ export class Settler {
   // ---------------------------------------------------------------- entry points
 
   /** A voucher from a phone. Idempotent: the same voucher always gets the same outcome. */
-  async handleVoucher(msg: VoucherMessage, deadlineMs = Date.now() + this.cfg.confirmWaitMs): Promise<Receipt> {
+  async handleVoucher(
+    msg: VoucherMessage,
+    deadlineMs = Date.now() + this.cfg.confirmWaitMs,
+    origin: Origin = {},
+  ): Promise<Receipt> {
     const v = toVoucher(msg);
+    const answer = (status: "rejected" | "retry", reason: string) =>
+      this.receipt({ sessionId: v.sessionId, nonce: v.nonce, status, reason });
+
     if (msg.chainId !== this.cfg.chainId || msg.vault.toLowerCase() !== this.cfg.vault.toLowerCase()) {
-      return this.receipt({ sessionId: v.sessionId, nonce: v.nonce, status: "rejected", reason: "WrongVault" });
+      return answer("rejected", "WrongVault");
     }
 
+    // A voucher the agent already knows always gets the same answer, outside every limit.
     const known = this.store.get(v.sessionId, v.nonce);
     if (known) return this.refresh(known, deadlineMs);
+
+    // Rails, checked before any RPC call so a bad voucher costs nothing.
+    const now = Math.floor(Date.now() / 1000);
+    if (v.maxFee < this.cfg.feeUnits) return answer("rejected", "FeeTooLow");
+    if (v.validBefore <= BigInt(now)) return answer("rejected", "VoucherExpired");
+    if (v.validBefore > BigInt(now + this.cfg.maxVoucherTtlSec)) return answer("rejected", "ValidityTooLong");
+
+    const sessionKey = v.sessionId.toLowerCase();
+    const nodeKey = origin.node ?? "api";
+    if (!this.perSession.allows(sessionKey) || !this.perNode.allows(nodeKey)) {
+      log("warn", "rate_limited", { sessionId: v.sessionId, node: nodeKey });
+      return answer("retry", "RateLimited");
+    }
+    this.perSession.record(sessionKey);
+    this.perNode.record(nodeKey);
 
     try {
       // Already settled by someone else (settlement is permissionless)?
@@ -98,6 +131,9 @@ export class Settler {
         this.store.update(v.sessionId, v.nonce, { status: "rejected", reason: sim.error });
         return this.fromRow(this.store.get(v.sessionId, v.nonce)!);
       }
+
+      const budget = this.budgetLeft();
+      if (budget) return answer("retry", budget);
 
       const fromBlock = await this.publicClient.getBlockNumber({ cacheTime: 0 });
       if (!this.store.claim(v.sessionId, v.nonce, JSON.stringify(msg), fromBlock)) {
@@ -160,6 +196,16 @@ export class Settler {
       lowGas: gas < this.cfg.minGasWei,
       feeUnits: this.cfg.feeUnits.toString(),
       settlements: this.store.counts(),
+      today: (() => {
+        const t = this.store.spend(utcDay());
+        return {
+          transactions: t.txCount,
+          gasWei: t.gasWei.toString(),
+          txCap: this.cfg.dailyTxCap,
+          gasBudgetWei: this.cfg.dailyGasBudgetWei.toString(),
+          paused: this.budgetLeft(),
+        };
+      })(),
     };
   }
 
@@ -210,6 +256,14 @@ export class Settler {
     }
   }
 
+  /** null if the agent may send another transaction today, otherwise the reason it may not. */
+  budgetLeft(): string | null {
+    const today = this.store.spend(utcDay());
+    if (today.txCount >= this.cfg.dailyTxCap) return "AgentDailyCapReached";
+    if (today.gasWei >= this.cfg.dailyGasBudgetWei) return "AgentGasBudgetReached";
+    return null;
+  }
+
   /** Transactions go out one at a time so the account nonce never races. */
   private send(args: ReturnType<Settler["settleArgs"]>, v: Voucher): Promise<Hex> {
     const job = this.sendQueue.then(async () => {
@@ -223,6 +277,7 @@ export class Settler {
         chain: this.chain,
         gas: 600_000n, // P-256 check in Solidity uses about 376k
       });
+      this.store.addSpend(utcDay(), 1, 0n);
       log("info", "submitted", { sessionId: v.sessionId, nonce: v.nonce, hash });
       return hash;
     });
@@ -240,6 +295,10 @@ export class Settler {
         .waitForTransactionReceipt({ hash: row.tx_hash, timeout: wait, pollingInterval: 400 })
         .catch(() => null);
       if (rcpt) {
+        // Count the gas once, when the agent first sees the receipt of its own transaction.
+        if (rcpt.from.toLowerCase() === this.agentAddress.toLowerCase()) {
+          this.store.addSpend(utcDay(), 0, rcpt.gasUsed * (rcpt.effectiveGasPrice ?? 0n));
+        }
         if (rcpt.status === "success") {
           this.store.update(row.session_id, row.nonce, { status: "confirmed", block: rcpt.blockNumber.toString() });
         } else {
@@ -320,6 +379,7 @@ export class Settler {
       }
       return;
     }
+    if (this.budgetLeft()) return; // try again tomorrow; the voucher stays open until it expires
     const hash = await this.send(args, v);
     this.store.update(row.session_id, row.nonce, { status: "submitted", tx_hash: hash, fee: fee.toString() });
   }

@@ -45,6 +45,11 @@ export class Store {
         updated_at integer not null
       );
       create index if not exists settlements_status on settlements(status);
+      create table if not exists daily_spend (
+        day text primary key,
+        tx_count integer not null default 0,
+        gas_wei text not null default '0'
+      );
     `);
   }
 
@@ -99,6 +104,26 @@ export class Store {
       n: number;
     }[];
     return Object.fromEntries(rows.map((r) => [r.status, r.n]));
+  }
+
+  /** What the agent has spent on gas on a UTC day (YYYY-MM-DD). */
+  spend(day: string): { txCount: number; gasWei: bigint } {
+    const r = this.db.prepare("select tx_count, gas_wei from daily_spend where day = ?").get(day) as
+      | { tx_count: number; gas_wei: string }
+      | undefined;
+    return { txCount: r?.tx_count ?? 0, gasWei: BigInt(r?.gas_wei ?? "0") };
+  }
+
+  addSpend(day: string, txCount: number, gasWei: bigint) {
+    this.db.transaction(() => {
+      const cur = this.spend(day);
+      this.db
+        .prepare(
+          `insert into daily_spend (day, tx_count, gas_wei) values (?, ?, ?)
+           on conflict(day) do update set tx_count = excluded.tx_count, gas_wei = excluded.gas_wei`,
+        )
+        .run(day, cur.txCount + txCount, (cur.gasWei + gasWei).toString());
+    })();
   }
 
   close() {

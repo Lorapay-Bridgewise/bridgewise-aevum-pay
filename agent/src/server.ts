@@ -3,7 +3,9 @@ import type { Hex } from "viem";
 import { z } from "zod";
 import { MESH_SIGNATURE_HEADER, verifyMesh } from "./meshSignature.js";
 import { phoneMessage, RECEIPT_CT, type Receipt } from "./messages.js";
-import { log, type Settler } from "./settler.js";
+import { log, type Origin, type Settler } from "./settler.js";
+import type { ActivityFeed } from "./activity.js";
+import { renderActivity } from "./page.js";
 
 const MAX_MESH_BYTES = 2048;
 
@@ -19,18 +21,20 @@ const meshEvent = z.object({
   ct: z.string().optional(),
 });
 
-export function createApp(settler: Settler) {
+export const REPO_URL = "https://github.com/Lorapay-Bridgewise/bridgewise-aevum-pay";
+
+export function createApp(settler: Settler, feed?: ActivityFeed) {
   const app = new Hono();
   const cfg = settler.cfg;
 
   /** Leave a margin under the Cloud's 5 s webhook timeout. */
   const deadline = () => Date.now() + cfg.confirmWaitMs;
 
-  async function dispatch(raw: unknown): Promise<Receipt | { error: string }> {
+  async function dispatch(raw: unknown, origin: Origin = {}): Promise<Receipt | { error: string }> {
     const parsed = phoneMessage.safeParse(raw);
     if (!parsed.success) return { error: "invalid_message" };
     const m = parsed.data;
-    if (m.t === "voucher") return settler.handleVoucher(m, deadline());
+    if (m.t === "voucher") return settler.handleVoucher(m, deadline(), origin);
     return settler.handleStatus(m.sessionId as Hex, m.nonce as Hex, deadline());
   }
 
@@ -57,7 +61,7 @@ export function createApp(settler: Settler) {
     if (!ev.success) return c.json({ error: "invalid_event" }, 400);
 
     const inner = safeJson(Buffer.from(ev.data.body, "base64").toString("utf8"));
-    const answer = await dispatch(inner);
+    const answer = await dispatch(inner, { node: ev.data.node?.mesh_node_id });
     log("info", "mesh_message", {
       id: ev.data.id,
       node: ev.data.node?.mesh_node_id,
@@ -88,6 +92,48 @@ export function createApp(settler: Settler) {
     }
     return c.json(await settler.handleStatus(sessionId as Hex, nonce as Hex, Date.now() + 500));
   });
+
+  if (feed) {
+    /** Make sure the feed has read something before the first page; never wait more than 3 s. */
+    const warm = () => Promise.race([feed.sync(), new Promise((r) => setTimeout(r, 3_000))]).catch(() => {});
+
+    app.get("/", (c) => c.redirect("/activity"));
+
+    app.get("/activity", async (c) => {
+      await warm();
+      const health = await settler.health().catch(() => undefined);
+      const head = await settler.publicClient.getBlockNumber().catch(() => undefined);
+      const html = renderActivity(feed, {
+        explorerUrl: cfg.explorerUrl,
+        vault: cfg.vault,
+        agent: settler.agentAddress,
+        repoUrl: REPO_URL,
+        health,
+      }, head);
+      return c.html(html);
+    });
+
+    app.get("/v1/activity", async (c) => {
+      await warm();
+      const t = feed.totals;
+      return c.json({
+        vault: cfg.vault,
+        agent: settler.agentAddress,
+        chainId: cfg.chainId,
+        scannedToBlock: feed.scannedTo.toString(),
+        caughtUp: feed.caughtUp,
+        totals: {
+          settled: t.settled,
+          volumeUnits: t.volume.toString(),
+          feesUnits: t.fees.toString(),
+          depositsUnits: t.deposits.toString(),
+          sessions: t.sessions,
+          revoked: t.revoked,
+        },
+        events: feed.latest(100),
+      });
+    });
+  }
 
   app.notFound((c) => c.json({ error: "not_found" }, 404));
   return app;

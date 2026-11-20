@@ -20,7 +20,10 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { offlineVaultAbi } from "../src/abi.js";
 import { createApp } from "../src/server.js";
-import { RECEIPT_TYPES, Settler } from "../src/settler.js";
+import { RECEIPT_TYPES, Settler, utcDay } from "../src/settler.js";
+import { assertSafeAgentKey } from "../src/config.js";
+import { ActivityFeed } from "../src/activity.js";
+import { tusd } from "../src/page.js";
 import { Store } from "../src/store.js";
 import { signMesh } from "../src/meshSignature.js";
 import type { Config } from "../src/config.js";
@@ -55,6 +58,7 @@ let anvil: ChildProcess;
 let token: Address;
 let vault: Address;
 let settler: Settler;
+let baseCfg: Config;
 let app: ReturnType<typeof createApp>;
 let phone: { priv: KeyObject; qx: Hex; qy: Hex };
 let sessionId: Hex;
@@ -204,7 +208,14 @@ beforeAll(async () => {
     confirmWaitMs: 3000,
     dbPath: ":memory:",
     minGasWei: 1n,
+    maxVoucherTtlSec: 7 * 86_400,
+    ratePerSessionHour: 30,
+    ratePerNodeHour: 120,
+    dailyTxCap: 1_000,
+    dailyGasBudgetWei: 10n ** 18n,
+    vaultFromBlock: 0n,
   };
+  baseCfg = cfg;
   settler = new Settler(cfg, new Store(":memory:"));
   app = createApp(settler);
 }, 60_000);
@@ -330,5 +341,122 @@ describe("settlement agent", () => {
     expect(h.ok).toBe(true);
     expect(h.agent).toBe(settler.agentAddress);
     expect(h.settlements.confirmed).toBeGreaterThan(0);
+  });
+});
+
+describe("rails", () => {
+  // The chain clock is a day ahead after the recovery test, so these vouchers live for two days.
+  const later = () => BigInt(Math.floor(Date.now() / 1000) + 2 * 86_400);
+  const txCount = () => pub.getTransactionCount({ address: settler.agentAddress });
+
+  it("refuses a voucher whose signed max fee is below the agent's fee, without an RPC call", async () => {
+    const before = await txCount();
+    const { receipt } = await viaMesh(newVoucher(ONE, { maxFee: 5_000n, validBefore: later() }));
+    expect(receipt!.status).toBe("rejected");
+    expect(receipt!.reason).toBe("FeeTooLow");
+    expect(await txCount()).toBe(before);
+  });
+
+  it("refuses vouchers that are already expired or valid for too long", async () => {
+    const past = await viaMesh(newVoucher(ONE, { validBefore: BigInt(Math.floor(Date.now() / 1000) - 10) }));
+    expect(past.receipt!.reason).toBe("VoucherExpired");
+    const forever = await viaMesh(newVoucher(ONE, { validBefore: BigInt(Math.floor(Date.now() / 1000) + 30 * 86_400) }));
+    expect(forever.receipt!.status).toBe("rejected");
+    expect(forever.receipt!.reason).toBe("ValidityTooLong");
+  });
+
+  it("rate limits new vouchers per session, but still answers repeats", async () => {
+    const limited = new Settler({ ...baseCfg, ratePerSessionHour: 2 }, new Store(":memory:"));
+    const limitedApp = createApp(limited);
+    const send = async (v: unknown) => {
+      const res = await limitedApp.request("/v1/vouchers", {
+        method: "POST",
+        headers: { "x-api-key": baseCfg.testApiKey! },
+        body: JSON.stringify(v),
+      });
+      return (await res.json()) as Receipt;
+    };
+    const first = newVoucher(ONE, { validBefore: later() });
+    expect((await send(first)).status).toBe("confirmed");
+    expect((await send(newVoucher(ONE, { validBefore: later() }))).status).toBe("confirmed");
+    const third = await send(newVoucher(ONE, { validBefore: later() }));
+    expect(third.status).toBe("retry");
+    expect(third.reason).toBe("RateLimited");
+    // A voucher it already settled is answered from its records, limit or not
+    expect((await send(first)).status).toBe("confirmed");
+  });
+
+  it("stops sending at its daily transaction cap, and counts the gas it spent", async () => {
+    const store = new Store(":memory:");
+    const capped = new Settler({ ...baseCfg, dailyTxCap: 1 }, store);
+    expect((await capped.handleVoucher(newVoucher(ONE, { validBefore: later() }))).status).toBe("confirmed");
+    const spent = store.spend(utcDay());
+    expect(spent.txCount).toBe(1);
+    expect(spent.gasWei).toBeGreaterThan(0n);
+
+    const before = await txCount();
+    const next = await capped.handleVoucher(newVoucher(ONE, { validBefore: later() }));
+    expect(next.status).toBe("retry");
+    expect(next.reason).toBe("AgentDailyCapReached");
+    expect(await txCount()).toBe(before);
+  });
+
+  it("refuses a public test key as the agent key on a real network", () => {
+    expect(() => assertSafeAgentKey(44005, AGENT_KEY)).toThrow(/public test key/);
+    expect(() => assertSafeAgentKey(31337, AGENT_KEY)).not.toThrow();
+    expect(() =>
+      assertSafeAgentKey(44005, `0x${randomBytes(32).toString("hex")}` as Hex),
+    ).not.toThrow();
+  });
+});
+
+describe("activity page", () => {
+  it("reads every vault event from the chain and shows it", async () => {
+    const feed = new ActivityFeed(pub as never, vault, 0n);
+    await feed.sync();
+    expect(feed.caughtUp).toBe(true);
+    const kinds = new Set(feed.latest(500).map((e) => e.kind));
+    expect([...kinds]).toEqual(expect.arrayContaining(["Deposited", "SessionOpened", "VoucherSettled"]));
+    expect(feed.totals.settled).toBeGreaterThan(5);
+    expect(feed.totals.sessions).toBe(1);
+
+    const withFeed = createApp(settler, feed);
+    const html = await (await withFeed.request("/activity")).text();
+    expect(html).toContain("Offline payments on Aevum");
+    expect(html).toContain(`${feed.totals.settled}</b><span>payments settled`);
+    expect(html).toContain("/tx/0x");
+
+    const json = (await (await withFeed.request("/v1/activity")).json()) as {
+      totals: { settled: number };
+      events: { kind: string }[];
+    };
+    expect(json.totals.settled).toBe(feed.totals.settled);
+    expect(json.events[0]).toHaveProperty("txHash");
+  });
+
+  it("never asks for more than 1,000 blocks per call", async () => {
+    const ranges: [bigint, bigint][] = [];
+    const fake = {
+      getBlockNumber: async () => 2_500n,
+      getContractEvents: async (q: { fromBlock: bigint; toBlock: bigint }) => {
+        ranges.push([q.fromBlock, q.toBlock]);
+        return [];
+      },
+      getBlock: async () => ({ timestamp: 0n }),
+    };
+    const feed = new ActivityFeed(fake as never, vault, 0n);
+    await feed.sync();
+    expect(ranges).toEqual([
+      [0n, 999n],
+      [1_000n, 1_999n],
+      [2_000n, 2_500n],
+    ]);
+    expect(feed.caughtUp).toBe(true);
+  });
+
+  it("formats tUSD8 amounts", () => {
+    expect(tusd(1_000_000n)).toBe("1.00");
+    expect(tusd("10000")).toBe("0.01");
+    expect(tusd(1_234_567_000n)).toBe("1,234.567");
   });
 });

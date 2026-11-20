@@ -63,6 +63,8 @@ pays gas in exchange for the fee in tUSD8.
 
 ## Settlement agent
 
+Live at **https://agent.lorapay.io/activity**: every vault event on Aevum testnet, read from the chain.
+
 `agent/` is a small TypeScript service (viem, Hono, SQLite) that receives vouchers from the Mesh Cloud
 webhook, simulates them, settles them with retries that can never pay twice, and answers with a receipt
 it signs (EIP-712). See [agent/README.md](agent/README.md).

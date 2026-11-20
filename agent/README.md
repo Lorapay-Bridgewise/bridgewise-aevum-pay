@@ -21,6 +21,26 @@ phone ◀─────────────────────── s
 | Verifiable receipts | Every answer is signed by the agent (EIP-712 `Receipt`), and confirmed ones can be checked on chain |
 | Only the Cloud can call the webhook | `Mesh-Signature` HMAC with the organisation's webhook secret, 5 minute window |
 
+## Rails
+
+Settlement costs the agent gas, so it refuses work that would let anyone burn it. Every check below
+runs before any call to the chain, so a refused voucher costs nothing.
+
+| Rail | Default | Answer |
+|---|---|---|
+| The signed `maxFee` must cover the agent's fee | `FEE_UNITS` = 0.01 tUSD8 | `rejected`, `FeeTooLow` |
+| No expired vouchers, and none valid for longer than a week | `MAX_VOUCHER_TTL_SEC` = 7 days | `rejected`, `VoucherExpired` / `ValidityTooLong` |
+| New vouchers per phone key per hour | `RATE_PER_SESSION_HOUR` = 30 | `retry`, `RateLimited` |
+| New vouchers per gateway phone per hour | `RATE_PER_NODE_HOUR` = 120 | `retry`, `RateLimited` |
+| Settlement transactions per UTC day | `DAILY_TX_CAP` = 1,000 | `retry`, `AgentDailyCapReached` |
+| Gas per UTC day | `DAILY_GAS_BUDGET_WEI` = 0.05 tQDAY | `retry`, `AgentGasBudgetReached` |
+| Public test keys (anvil, Hardhat) as the agent key | refused on any real network | the agent does not start |
+
+A voucher the agent already knows is always answered from its records, whatever the limits.
+The week limit is longer than the starter kit's one hour on purpose: an offline payment can take
+days to reach a phone with signal. Limits live in memory and in the agent's SQLite file, which is
+fine for one server.
+
 ## Messages
 
 They travel as the `body` of a mesh app data message (JSON, at most 2048 bytes).
@@ -68,8 +88,8 @@ They travel as the `body` of a mesh app data message (JSON, at most 2048 bytes).
 |---|---|---|
 | `confirmed` | Mined. The payee has the money | Show paid, link to the explorer |
 | `submitted` | Sent, not mined yet | Show pending, send a status message later |
-| `rejected` | The vault refused it; `reason` says why (`BadSignature`, `OverPaymentCap`, `SessionRevokedErr`, `VoucherExpired`, …) | Show failed |
-| `retry` | Could not settle now (`OverDailyCap`, `InsufficientBalance`, `ChainUnavailable`) | Keep it, send it again later |
+| `rejected` | It will never settle; `reason` says why (`BadSignature`, `OverPaymentCap`, `SessionRevokedErr`, `VoucherExpired`, `FeeTooLow`, `ValidityTooLong`, …) | Show failed |
+| `retry` | Could not settle now (`OverDailyCap`, `InsufficientBalance`, `ChainUnavailable`, `RateLimited`, `AgentDailyCapReached`, `AgentGasBudgetReached`) | Keep it, send it again later |
 | `unknown` | The agent has never seen this voucher | Send the voucher itself |
 
 The receipt signature is EIP-712, domain `{name: "Bridgewise Settlement Agent", version: "1", chainId, verifyingContract: vault}`:
@@ -87,6 +107,9 @@ status: 0 unknown, 1 submitted, 2 confirmed, 3 rejected, 4 retry
 | `POST /v1/vouchers` | `x-api-key: $TEST_API_KEY` | Same messages without the mesh, for curl tests |
 | `GET /v1/vouchers/:sessionId/:nonce` | none | Receipt for a voucher (public data) |
 | `GET /health` | none | Chain, agent address, gas balance, counts. 503 when gas is low |
+| `GET /activity` | none | Activity page: every vault event read from the chain, with explorer links |
+| `GET /v1/activity` | none | The same as JSON |
+| `GET /live` | none | Liveness only (Docker and the deploy check) |
 
 ## Run locally
 
