@@ -45,6 +45,13 @@ export class Store {
         updated_at integer not null
       );
       create index if not exists settlements_status on settlements(status);
+      create table if not exists starter_gifts (
+        address text primary key,
+        ip text not null,
+        day text not null,
+        tx_hash text,
+        created_at integer not null
+      );
       create table if not exists daily_spend (
         day text primary key,
         tx_count integer not null default 0,
@@ -124,6 +131,35 @@ export class Store {
         )
         .run(day, cur.txCount + txCount, (cur.gasWei + gasWei).toString());
     })();
+  }
+
+  // ---------------------------------------------------------------- starter money
+
+  /** Claims the one gift an address may get. False if it already had one (or one is in flight). */
+  claimStarter(address: string, ip: string, day: string): boolean {
+    const res = this.db
+      .prepare("insert or ignore into starter_gifts (address, ip, day, created_at) values (?, ?, ?, ?)")
+      .run(address.toLowerCase(), ip, day, Date.now());
+    return res.changes === 1;
+  }
+
+  setStarterTx(address: string, txHash: Hex) {
+    this.db.prepare("update starter_gifts set tx_hash = ? where address = ?").run(txHash, address.toLowerCase());
+  }
+
+  /** The send failed before reaching the chain: let the address try again. */
+  releaseStarter(address: string) {
+    this.db.prepare("delete from starter_gifts where address = ? and tx_hash is null").run(address.toLowerCase());
+  }
+
+  startersOn(day: string): number {
+    return (this.db.prepare("select count(*) as n from starter_gifts where day = ?").get(day) as { n: number }).n;
+  }
+
+  startersFromIp(ip: string, day: string): number {
+    return (
+      this.db.prepare("select count(*) as n from starter_gifts where ip = ? and day = ?").get(ip, day) as { n: number }
+    ).n;
   }
 
   close() {

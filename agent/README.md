@@ -38,6 +38,14 @@ runs before any call to the chain, so a refused voucher costs nothing.
 
 | Owner actions per wallet per hour | `RATE_PER_OWNER_HOUR` = 20 | `retry`, `RateLimited` |
 | Smallest deposit it submits | `MIN_DEPOSIT_UNITS` = 0.1 tUSD8 | `rejected`, `DepositTooSmall` |
+| Starter money: one gift per address, only to a wallet holding nothing | `STARTER_UNITS` = 2 tUSD8 | `rejected`, `AlreadyGiven` / `NotANewWallet` |
+| Starter gifts per IP address per UTC day | `STARTER_PER_IP_DAY` = 3 | `retry`, `RateLimited` |
+| Starter gifts per UTC day | `STARTER_PER_DAY` = 50 | `retry`, `StarterDailyLimit` |
+| Starter pool (the agent's own tUSD8) | at least one gift | `retry`, `StarterPoolEmpty` |
+
+Starter money (`POST /v1/starter` with `{"address": "0x…"}`, and `GET /v1/starter` to see whether
+gifts are available) lets a new app user try a payment without the Discord faucet. It comes from
+the agent's own tUSD8, so top it up by sending tUSD8 to the agent address.
 
 A voucher the agent already knows is always answered from its records, whatever the limits.
 
@@ -113,14 +121,43 @@ status: 0 unknown, 1 submitted, 2 confirmed, 3 rejected, 4 retry
 | `POST /mesh/webhook` | `Mesh-Signature` | The Mesh Cloud's webhook |
 | `POST /v1/vouchers` | `x-api-key: $TEST_API_KEY` | Same messages without the mesh, for curl tests |
 | `GET /v1/vouchers/:sessionId/:nonce` | none | Receipt for a voucher (public data) |
-| `GET /health` | none | Chain, agent address, gas balance, counts. 503 when gas is low |
+| `POST /v1/pay` | none (same rails as the webhook; the IP address counts as the node) | A voucher or status message from a phone with its own internet; answers with the signed receipt |
+| `GET /v1/config` | none | Vault, registry, agent address, which allowance agent, deployed commit |
+| `GET /v1/payments/to/:address` | none | Money paid to an address, with who paid and their registered name |
+| `GET /v1/names/:address` | none | The registered name of an address |
+| `GET /v1/names?name=…` | none | The address holding a registered name (any case) |
+| `POST /v1/names` | the owner's EIP-712 signature | Register a name without gas (`registerBySig`); 5 per wallet and 60 per IP per hour |
+| `POST /v1/names/release` | the owner's EIP-712 signature | Give a name up (`releaseBySig`) |
+| `POST /v1/allowance` | none (30 per IP per hour) | The allowance agent: `{"text": "$10 a day this week"}` gives proposed limits, or a question. Changes nothing |
+| `GET /health` | none | Chain, agent address, gas balance, counts, deployed `commit`. 503 when gas is low |
 | `POST /v1/owner/deposit` | the owner's tUSD8 permit | Deposit into the vault without tQDAY (`depositWithPermit`) |
 | `POST /v1/owner/session` | the owner's signature | Add a phone key with limits (`openSessionBySig`) |
 | `POST /v1/owner/revoke` | the owner's signature | Remove a phone key (`revokeBySig`) |
 | `POST /v1/owner/withdraw` | the owner's signature | Take money back out (`withdrawBySig`) |
+| `GET /v1/starter` | none | Whether starter money is on, and how much |
+| `POST /v1/starter` | none (rails above) | Send starter tUSD8 to a new wallet |
 | `GET /activity` | none | Activity page: every vault event read from the chain, with explorer links |
 | `GET /v1/activity` | none | The same as JSON |
 | `GET /live` | none | Liveness only (Docker and the deploy check) |
+
+## Allowance agent
+
+`POST /v1/allowance` turns the person's own words into offline limits for their phone:
+
+```
+{"text": "let me spend up to $20 this weekend, nothing over $3 at once"}
+→ {"perPaymentCap": "3000000", "dailyCap": "6670000", "days": 3,
+   "summary": "Up to $3 a payment and $6.67 a day, for 3 days.", "source": "claude"}
+```
+
+With `ANTHROPIC_API_KEY` set it asks Claude (`ALLOWANCE_MODEL`, default `claude-haiku-5-5`). The
+person's words go to the model fenced as data, the answer must be one JSON object, and it is
+validated and clamped. Without a key, or when Claude fails, simple rules read the common ways of
+saying it ("a day", "at once", "this weekend", "for 3 days", "until Friday"). Either way:
+
+- it only proposes; the app shows the summary and the person approves it with their fingerprint;
+- the OfflineVault enforces what was approved;
+- nothing above $50 a payment, $200 a day or 30 days can come out of it, whatever it is told.
 
 ## Run locally
 

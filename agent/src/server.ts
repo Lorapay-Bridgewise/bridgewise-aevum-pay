@@ -7,6 +7,9 @@ import { log, type Origin, type Settler } from "./settler.js";
 import type { ActivityFeed } from "./activity.js";
 import { renderActivity } from "./page.js";
 import { addOwnerRoutes } from "./ownerRoutes.js";
+import { addStarterRoutes } from "./starterRoutes.js";
+import { addPublicRoutes } from "./publicRoutes.js";
+import { addAllowanceRoutes } from "./allowance.js";
 
 const MAX_MESH_BYTES = 2048;
 
@@ -24,7 +27,7 @@ const meshEvent = z.object({
 
 export const REPO_URL = "https://github.com/Lorapay-Bridgewise/bridgewise-aevum-pay";
 
-export function createApp(settler: Settler, feed?: ActivityFeed) {
+export function createApp(settler: Settler, feed?: ActivityFeed, opts: { fetchImpl?: typeof fetch } = {}) {
   const app = new Hono();
   const cfg = settler.cfg;
 
@@ -86,6 +89,9 @@ export function createApp(settler: Settler, feed?: ActivityFeed) {
   });
 
   addOwnerRoutes(app, settler);
+  addStarterRoutes(app, settler);
+  addPublicRoutes(app, settler, feed);
+  addAllowanceRoutes(app, settler, opts.fetchImpl);
 
   /** Public lookup: receipts only say what is already public on chain. */
   app.get("/v1/vouchers/:sessionId/:nonce", async (c) => {

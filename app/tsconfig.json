@@ -1,0 +1,10 @@
+{
+  "extends": "@react-native/typescript-config",
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["**/node_modules", "**/Pods", "android"],
+  "compilerOptions": {
+    // The mesh SDK is linked from ../../mesh-sdk/react-native: resolve its imports from here
+    "preserveSymlinks": true,
+    "types": ["jest", "node"]
+  }
+}

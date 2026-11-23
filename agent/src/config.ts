@@ -42,8 +42,32 @@ const schema = z.object({
   /** Gas the agent may spend per UTC day, in wei. 0.05 tQDAY by default. */
   DAILY_GAS_BUDGET_WEI: z.coerce.bigint().default(5n * 10n ** 16n),
 
+  // Starter money: a small tUSD8 gift to each new wallet, from the agent's own tUSD8.
+  /** Gift size in tUSD8 units. 0 turns starter money off. */
+  STARTER_UNITS: z.coerce.bigint().default(2_000_000n),
+  /** Gifts per UTC day, all wallets together. */
+  STARTER_PER_DAY: z.coerce.number().int().nonnegative().default(50),
+  /** Gifts per IP address per UTC day. */
+  STARTER_PER_IP_DAY: z.coerce.number().int().nonnegative().default(3),
+
   /** First block to read for the activity page (the vault's deploy block). */
   VAULT_FROM_BLOCK: z.coerce.bigint().default(3_646_498n),
+
+  // Confirmation of Payee
+  /** The PayeeRegistry contract. Empty turns the name routes off. */
+  PAYEE_REGISTRY: z.union([hex(40), z.literal("")]).optional(),
+  /** First block to read registry events from (its deploy block). 0 = the latest 50,000 blocks. */
+  REGISTRY_FROM_BLOCK: z.coerce.bigint().default(0n),
+
+  // Allowance agent
+  /** Anthropic API key. Without one the allowance agent uses its simple rules. */
+  ANTHROPIC_API_KEY: z.string().optional(),
+  ALLOWANCE_MODEL: z.string().default("claude-haiku-5-5"),
+  /** Naira per dollar for wording like "5,000 naira a day". Empty: ask the person to use dollars. */
+  NGN_PER_USD: z.coerce.number().positive().optional(),
+
+  /** The commit this build came from, shown in /health. Set by the deploy. */
+  AGENT_COMMIT: z.string().default("unknown"),
 });
 
 export type Config = {
@@ -67,6 +91,15 @@ export type Config = {
   dailyTxCap: number;
   dailyGasBudgetWei: bigint;
   vaultFromBlock: bigint;
+  starterUnits: bigint;
+  starterPerDay: number;
+  starterPerIpDay: number;
+  registry?: Address;
+  registryFromBlock: bigint;
+  anthropicKey?: string;
+  allowanceModel: string;
+  ngnPerUsd?: number;
+  commit: string;
 };
 
 /**
@@ -127,5 +160,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dailyTxCap: e.DAILY_TX_CAP,
     dailyGasBudgetWei: e.DAILY_GAS_BUDGET_WEI,
     vaultFromBlock: e.VAULT_FROM_BLOCK,
+    starterUnits: e.STARTER_UNITS,
+    starterPerDay: e.STARTER_PER_DAY,
+    starterPerIpDay: e.STARTER_PER_IP_DAY,
+    registry: e.PAYEE_REGISTRY ? (e.PAYEE_REGISTRY as Address) : undefined,
+    registryFromBlock: e.REGISTRY_FROM_BLOCK,
+    anthropicKey: e.ANTHROPIC_API_KEY || undefined,
+    allowanceModel: e.ALLOWANCE_MODEL,
+    ngnPerUsd: e.NGN_PER_USD,
+    commit: e.AGENT_COMMIT,
   };
 }

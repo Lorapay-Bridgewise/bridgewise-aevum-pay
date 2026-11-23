@@ -6,7 +6,7 @@ import { log } from "./settler.js";
 const CHUNK = 1_000n;
 /** At most this many chunks per sync pass, so a long backlog never blocks a request for long. */
 const MAX_CHUNKS_PER_SYNC = 200;
-const KEEP = 500;
+const KEEP = 5_000;
 
 export type VaultEvent = {
   kind: "Deposited" | "Withdrawn" | "SessionOpened" | "SessionRevoked" | "VoucherSettled";
@@ -38,6 +38,8 @@ export class ActivityFeed {
   private head = 0n;
   private syncing: Promise<void> | null = null;
   totals = { settled: 0, volume: 0n, fees: 0n, deposits: 0n, sessions: 0, revoked: 0 };
+  /** Every session's owner, all time: who paid, for the payee's list of money in. */
+  private owners = new Map<string, Address>();
 
   constructor(
     private readonly client: PublicClient,
@@ -57,6 +59,19 @@ export class ActivityFeed {
 
   latest(n = 100): VaultEvent[] {
     return this.events.slice(-n).reverse();
+  }
+
+  /** Settlements paid to an address, newest first, with the paying wallet. */
+  paidTo(payee: Address, n = 50): (VaultEvent & { from?: Address })[] {
+    const want = payee.toLowerCase();
+    const out: (VaultEvent & { from?: Address })[] = [];
+    for (let i = this.events.length - 1; i >= 0 && out.length < n; i--) {
+      const e = this.events[i];
+      if (e.kind === "VoucherSettled" && e.payee?.toLowerCase() === want) {
+        out.push({ ...e, from: e.sessionId ? this.owners.get(e.sessionId.toLowerCase()) : undefined });
+      }
+    }
+    return out;
   }
 
   /** One pass. Concurrent callers share the same pass. */
@@ -115,7 +130,10 @@ export class ActivityFeed {
       t.volume += BigInt(e.amount ?? 0);
       t.fees += BigInt(e.fee ?? 0);
     } else if (e.kind === "Deposited") t.deposits += BigInt(e.amount ?? 0);
-    else if (e.kind === "SessionOpened") t.sessions++;
+    else if (e.kind === "SessionOpened") {
+      t.sessions++;
+      if (e.sessionId && e.owner) this.owners.set(e.sessionId.toLowerCase(), e.owner);
+    }
     else if (e.kind === "SessionRevoked") t.revoked++;
   }
 }

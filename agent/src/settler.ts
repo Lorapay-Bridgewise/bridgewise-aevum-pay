@@ -1,10 +1,12 @@
 import {
+  erc20Abi,
   BaseError,
   ContractFunctionRevertedError,
   createPublicClient,
   createWalletClient,
   defineChain,
   http,
+  type Abi,
   type Address,
   type Hex,
   type PublicClient,
@@ -191,6 +193,7 @@ export class Settler {
     ]);
     return {
       ok: gas >= this.cfg.minGasWei,
+      commit: this.cfg.commit,
       chainId: this.cfg.chainId,
       block: block.toString(),
       vault: this.cfg.vault,
@@ -269,9 +272,23 @@ export class Settler {
     args: readonly unknown[],
     deadlineMs = Date.now() + this.cfg.confirmWaitMs,
   ): Promise<RelayResult> {
+    return this.relayCall(this.cfg.vault, offlineVaultAbi, functionName, args, deadlineMs);
+  }
+
+  /**
+   * Submits a signed action for someone else (the vault's BySig functions, the registry's).
+   * Simulates first, so a refusal costs no gas and comes back with the contract's reason.
+   */
+  async relayCall(
+    address: Address,
+    abi: Abi,
+    functionName: string,
+    args: readonly unknown[],
+    deadlineMs = Date.now() + this.cfg.confirmWaitMs,
+  ): Promise<RelayResult> {
     const budget = this.budgetLeft();
     if (budget) return { status: "retry", reason: budget };
-    const call = { address: this.cfg.vault, abi: offlineVaultAbi, functionName, args, account: this.account } as const;
+    const call = { address, abi, functionName, args, account: this.account } as const;
     try {
       await this.publicClient.simulateContract(call as never);
     } catch (err) {
@@ -283,8 +300,8 @@ export class Settler {
     try {
       const job = this.sendQueue.then(async () => {
         const h = await this.walletClient.writeContract({
-          address: this.cfg.vault,
-          abi: offlineVaultAbi,
+          address,
+          abi,
           functionName,
           args,
           account: this.account,
@@ -299,6 +316,60 @@ export class Settler {
       hash = await job;
     } catch (err) {
       log("warn", "owner_action_failed", { action: functionName, err: short(err) });
+      return { status: "retry", reason: "ChainUnavailable" };
+    }
+    const wait = Math.max(0, deadlineMs - Date.now());
+    const rcpt = await this.publicClient
+      .waitForTransactionReceipt({ hash, timeout: wait, pollingInterval: 400 })
+      .catch(() => null);
+    if (!rcpt) return { status: "submitted", txHash: hash };
+    this.store.addSpend(utcDay(), 0, rcpt.gasUsed * (rcpt.effectiveGasPrice ?? 0n));
+    return rcpt.status === "success"
+      ? { status: "confirmed", txHash: hash }
+      : { status: "rejected", txHash: hash, reason: "Reverted" };
+  }
+
+  private tokenAddress?: Address;
+
+  /** tUSD8, as the vault holds it. Read once. */
+  async token(): Promise<Address> {
+    this.tokenAddress ??= (await this.publicClient.readContract({
+      address: this.cfg.vault,
+      abi: offlineVaultAbi,
+      functionName: "token",
+    })) as Address;
+    return this.tokenAddress;
+  }
+
+  async tokenBalance(owner: Address): Promise<bigint> {
+    return this.publicClient.readContract({ address: await this.token(), abi: erc20Abi, functionName: "balanceOf", args: [owner] });
+  }
+
+  /** Sends tUSD8 from the agent's own wallet (starter money). Same queue and budget as settlements. */
+  async sendToken(to: Address, amount: bigint, deadlineMs = Date.now() + this.cfg.confirmWaitMs): Promise<RelayResult> {
+    const budget = this.budgetLeft();
+    if (budget) return { status: "retry", reason: budget };
+    let hash: Hex;
+    try {
+      const token = await this.token();
+      const job = this.sendQueue.then(async () => {
+        const h = await this.walletClient.writeContract({
+          address: token,
+          abi: erc20Abi,
+          functionName: "transfer",
+          args: [to, amount],
+          account: this.account,
+          chain: this.chain,
+          gas: 120_000n,
+        });
+        this.store.addSpend(utcDay(), 1, 0n);
+        log("info", "starter_submitted", { to, amount: amount.toString(), hash: h });
+        return h;
+      });
+      this.sendQueue = job.catch(() => undefined);
+      hash = await job;
+    } catch (err) {
+      log("warn", "starter_failed", { to, err: short(err) });
       return { status: "retry", reason: "ChainUnavailable" };
     }
     const wait = Math.max(0, deadlineMs - Date.now());

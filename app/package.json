@@ -1,0 +1,63 @@
+{
+  "name": "aevum-pay",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "android": "react-native run-android",
+    "start": "react-native start",
+    "test": "jest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@bridgewise/mesh-react-native": "file:../../mesh-sdk/react-native",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@react-native-async-storage/async-storage": "^3.1.1",
+    "@react-native-clipboard/clipboard": "^1.16.3",
+    "@react-navigation/bottom-tabs": "^7.22.0",
+    "@react-navigation/native": "^7.5.2",
+    "@react-navigation/native-stack": "^7.21.1",
+    "react": "19.2.3",
+    "react-native": "0.87.1",
+    "react-native-camera-kit": "^18.0.1",
+    "react-native-get-random-values": "^2.1.0",
+    "react-native-keychain": "^10.0.0",
+    "react-native-qrcode-svg": "^6.3.54",
+    "react-native-safe-area-context": "^5.5.2",
+    "react-native-screens": "^4.30.1",
+    "react-native-svg": "^15.16.1",
+    "viem": "^2.58.2",
+    "zod": "^4.6.7",
+    "zustand": "^5.1.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@babel/plugin-transform-export-namespace-from": "^7.29.15",
+    "@babel/preset-env": "^7.25.3",
+    "@babel/runtime": "^7.25.0",
+    "@react-native-community/cli": "20.2.0",
+    "@react-native-community/cli-platform-android": "20.2.0",
+    "@react-native/babel-preset": "0.87.1",
+    "@react-native/eslint-config": "0.87.1",
+    "@react-native/jest-preset": "0.87.1",
+    "@react-native/metro-config": "0.87.1",
+    "@react-native/typescript-config": "0.87.1",
+    "@testing-library/react-native": "^14.1.0",
+    "@types/jest": "^29.5.13",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.2.0",
+    "@types/react-test-renderer": "^19.1.0",
+    "eslint": "^8.19.0",
+    "jest": "^29.6.3",
+    "prettier": "2.8.8",
+    "react-test-renderer": "19.2.3",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">= 22.11.0"
+  },
+  "description": "Offline tUSD8 payments on Aevum: sign with a hardware key, carry over Bluetooth, settle when any phone has signal.",
+  "license": "MIT"
+}
